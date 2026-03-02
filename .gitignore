@@ -1,0 +1,106 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+.pytest_cache/
+nosetests.xml
+coverage.xml
+*.cover
+
+# Translations
+*.mo
+*.pot
+
+# Django stuff:
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+
+# Flask stuff:
+instance/
+.webassets-cache
+
+# Sphinx documentation
+docs/_build/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pyenv
+.python-version
+
+# virtualenvs
+venv/
+ENV/
+env/
+.venv/
+venv.bak/
+
+# IDEs and editors
+.idea/
+.vscode/
+*.sublime-workspace
+*.sublime-project
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Environment files
+.env
+.env.*
+
+# Model and large binary files
+models/
+*.gguf
+*.bin
+*.pt
+*.ckpt
+
+# llama.cpp build artifacts
+llama.cpp/build/
+llama.cpp/**/*.o
+llama.cpp/main
+
+# Windows
+ehthumbs.db
+Icon\r
+Desktop.ini
+
+# Coverage and profiling
+htmlcov/
+coverage/
+*.prof
+
+# Docker
+docker-compose.override.yml
+
+# Generated files
+*.pyc
+*.pyo
+*.pyd
