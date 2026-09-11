@@ -26,7 +26,8 @@ pi-code-assistant/
 │   │   └── files.py              # FileTool (read/save, project-boundary enforced)
 │   ├── core/
 │   │   ├── events.py             # StreamEvent/EventType/AssistantStatus
-│   │   ├── session.py            # SessionState + SessionStore (JSON persistence)
+│   │   ├── project.py            # resolve_project_root() -- app root vs. project root
+│   │   ├── session.py            # SessionState + SessionStore (JSON persistence, project-scoped)
 │   │   └── assistant_service.py  # AssistantService: ties it all together
 │   └── tui/
 │       ├── app.py                # PiAiCoderApp (Textual)
@@ -95,7 +96,8 @@ pi-code-assistant/
 
 **pi_ai_coder/core/**
 - `assistant_service.py`: `AssistantService` -- context resolution, message assembly, blocking/streaming chat
-- `session.py`: `SessionState`/`SessionStore` -- JSON persistence under `.pi-ai-coder/`
+- `project.py`: `resolve_project_root()` -- the one canonical project/workspace root, validated to exist and be a directory; the CLI and TUI both resolve it once and pass it into every project-oriented component (never scattered `Path.cwd()` calls)
+- `session.py`: `SessionState`/`SessionStore` -- JSON persistence under `<project_root>/.pi-ai-coder/`, so two projects never share session state
 - `events.py`: the `StreamEvent`/`EventType`/`AssistantStatus` vocabulary used to stream activity to a UI
 
 **pi_ai_coder/tui/**
@@ -271,6 +273,8 @@ Done in this iteration:
 - [x] Multi-provider model backend: llama.cpp and Ollama behind one interface, chosen via config/`--provider`/host profile
 - [x] Named host profiles (`config.yaml`'s `profiles:` section) for using one project directory from multiple machines
 - [x] Model discovery (`models`/`model <name>` commands, "List models"/"Change model" in the TUI)
+- [x] Canonical project/workspace root (`pi_ai_coder/core/project.py`), `--project` on both the CLI and `tui`, decoupled from PI-AI-CODER's own install directory
+- [x] User-level config (`~/.config/pi-ai-coder/config.yaml`) so provider/profile setup persists across projects
 
 Still potential improvements:
 - [ ] In-place file editing (preview is currently read-only)
@@ -296,6 +300,7 @@ tests/
 ├── test_ollama_provider.py     # HTTP calls mocked -- no server needed
 ├── test_factory.py
 ├── test_import_order.py        # guards against a circular-import regression
+├── test_project_root.py        # app-root vs. project-root, launched via subprocess
 ├── test_assistant_service.py
 └── test_tui_smoke.py           # headless Textual Pilot tests
 ```

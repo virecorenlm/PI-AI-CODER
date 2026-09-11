@@ -241,6 +241,26 @@ chmod +x *.py *.sh
 ./run.sh --help
 ```
 
+## 📂 Working on a Different Project
+
+PI-AI-CODER is installed once but works like Claude Code/Codex on whatever
+project you point it at -- it never operates on its own source directory
+unless that's literally where you run it from:
+
+```bash
+cd ~/GITHUB/my-other-project
+pi-coder tui              # opens ~/GITHUB/my-other-project as the workspace
+
+# or, from anywhere:
+pi-coder tui --project ~/GITHUB/my-other-project
+pi-coder --project ~/GITHUB/my-other-project -q "explain this repo"
+```
+
+Provider/profile settings you set up once apply everywhere: put them in
+`~/.config/pi-ai-coder/config.yaml` (or `$XDG_CONFIG_HOME/pi-ai-coder/config.yaml`)
+instead of a per-project `config.yaml`, and `--profile asrock` (etc.) keeps
+working no matter which project you `cd` into.
+
 ## 🧪 Development
 
 ```bash

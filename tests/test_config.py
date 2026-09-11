@@ -1,6 +1,6 @@
 import pytest
 
-from pi_ai_coder.config import load_config
+from pi_ai_coder.config import load_config, user_config_path
 
 
 def test_defaults_without_any_config():
@@ -151,6 +151,86 @@ def test_unknown_profile_raises(tmp_path):
     config_file.write_text("profiles:\n  pi5:\n    threads: 4\n")
     with pytest.raises(ValueError):
         load_config(config_path=str(config_file), env={}, profile="nonexistent")
+
+
+def test_user_config_path_respects_xdg_config_home(tmp_path):
+    env = {"XDG_CONFIG_HOME": str(tmp_path / "xdg")}
+    assert user_config_path(env) == tmp_path / "xdg" / "pi-ai-coder" / "config.yaml"
+
+
+def test_user_config_path_falls_back_to_home_dot_config(tmp_path):
+    env = {"HOME": str(tmp_path)}
+    assert user_config_path(env) == tmp_path / ".config" / "pi-ai-coder" / "config.yaml"
+
+
+def test_user_level_config_applies_regardless_of_project_dir(tmp_path):
+    """The bug this fixes: a profile set up once (e.g. while working inside
+    the PI-AI-CODER repo) must keep working from a completely unrelated
+    project directory -- that's the whole point of a user-level config."""
+    fake_home = tmp_path / "home"
+    user_cfg_dir = fake_home / ".config" / "pi-ai-coder"
+    user_cfg_dir.mkdir(parents=True)
+    (user_cfg_dir / "config.yaml").write_text(
+        """
+profiles:
+  asrock:
+    provider: ollama
+    ollama_host: "http://127.0.0.1:11434"
+    model: "qwen3.5:latest"
+"""
+    )
+
+    unrelated_project = tmp_path / "some-other-project"
+    unrelated_project.mkdir()
+
+    config = load_config(
+        project_dir=str(unrelated_project),
+        env={"HOME": str(fake_home)},
+        profile="asrock",
+    )
+    assert config.model.provider == "ollama"
+    assert config.ollama.model == "qwen3.5:latest"
+
+
+def test_project_config_overrides_user_config(tmp_path):
+    fake_home = tmp_path / "home"
+    user_cfg_dir = fake_home / ".config" / "pi-ai-coder"
+    user_cfg_dir.mkdir(parents=True)
+    (user_cfg_dir / "config.yaml").write_text("model:\n  temperature: 0.9\n")
+
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "config.yaml").write_text("model:\n  temperature: 0.2\n")
+
+    config = load_config(project_dir=str(project), env={"HOME": str(fake_home)})
+    assert config.model.temperature == 0.2
+
+
+def test_user_and_project_profiles_merge(tmp_path):
+    fake_home = tmp_path / "home"
+    user_cfg_dir = fake_home / ".config" / "pi-ai-coder"
+    user_cfg_dir.mkdir(parents=True)
+    (user_cfg_dir / "config.yaml").write_text(
+        "profiles:\n  fromuser:\n    threads: 2\n"
+    )
+
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "config.yaml").write_text(
+        "profiles:\n  fromproject:\n    threads: 16\n"
+    )
+
+    config_a = load_config(project_dir=str(project), env={"HOME": str(fake_home)}, profile="fromuser")
+    assert config_a.model.threads == 2
+
+    config_b = load_config(project_dir=str(project), env={"HOME": str(fake_home)}, profile="fromproject")
+    assert config_b.model.threads == 16
+
+
+def test_no_user_config_file_is_a_silent_noop(tmp_path):
+    # HOME points somewhere with no ~/.config/pi-ai-coder/config.yaml at all.
+    config = load_config(project_dir=str(tmp_path), env={"HOME": str(tmp_path / "empty-home")})
+    assert config.model.provider == "llama_cpp"
 
 
 def test_env_and_cli_still_win_over_profile(tmp_path):

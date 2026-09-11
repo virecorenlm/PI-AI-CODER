@@ -1,4 +1,5 @@
 from .events import AssistantStatus, EventType, StreamEvent
+from .project import ProjectRootError, resolve_project_root
 from .session import SessionState, SessionStore
 
 __all__ = [
@@ -9,6 +10,8 @@ __all__ = [
     "SessionStore",
     "AssistantService",
     "DEFAULT_SYSTEM_PROMPT",
+    "ProjectRootError",
+    "resolve_project_root",
 ]
 
 # AssistantService is resolved lazily (PEP 562) rather than imported eagerly

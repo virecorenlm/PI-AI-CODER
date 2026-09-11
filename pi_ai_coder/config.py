@@ -2,7 +2,7 @@
 
 Precedence (lowest to highest):
 
-    built-in defaults  <  config file (YAML)  <  selected host profile  <  environment variables  <  CLI arguments
+    built-in defaults  <  user config  <  project config file  <  selected host profile  <  environment variables  <  CLI arguments
 
 The application must remain usable without the user ever creating a config
 file -- every field has a sensible default matching ``config.example.yaml``.
@@ -11,6 +11,18 @@ PI-AI-CODER targets multiple Linux hosts (Raspberry Pi, workstations, etc.)
 with different model backends. Hardware-specific tuning (thread counts,
 context sizes, which provider to use) belongs here -- in configuration and
 optional per-host "profiles" -- never hard-coded into the application core.
+
+There are two separate roots at play: the *application* root (wherever
+PI-AI-CODER is installed) and the *project* root (the user's active
+workspace, resolved by ``pi_ai_coder.core.project.resolve_project_root``).
+Project-level config (``<project>/config.yaml``) is scoped to whichever
+project is currently open. But provider/profile setup (e.g. "always use my
+Ollama server") is something a user reasonably wants to configure *once*
+and have apply everywhere, regardless of which project they're in -- that's
+what the user-level config file below is for. It is intentionally NOT tied
+to the application's install directory either: it lives in the standard
+per-user config location so `pip install`-ing PI-AI-CODER elsewhere doesn't
+lose it.
 """
 
 from __future__ import annotations
@@ -77,6 +89,32 @@ def _find_config_file(project_dir: Path) -> Optional[Path]:
         if candidate.is_file():
             return candidate
     return None
+
+
+def user_config_path(env: Optional[Dict[str, str]] = None) -> Path:
+    """Where the user-level config file lives: ``$XDG_CONFIG_HOME/pi-ai-coder/config.yaml``,
+    or ``~/.config/pi-ai-coder/config.yaml`` if that's unset.
+
+    Reads from ``env`` (falling back to real ``os.environ``) rather than
+    always reading the process environment directly, so callers -- tests
+    especially -- can fully isolate this from the actual user's home
+    directory by passing a custom ``env`` dict.
+    """
+    env = env if env is not None else os.environ
+    xdg_home = env.get("XDG_CONFIG_HOME")
+    if xdg_home:
+        base = Path(xdg_home).expanduser()
+    else:
+        home = env.get("HOME")
+        base = (Path(home).expanduser() if home else Path.home()) / ".config"
+    return base / "pi-ai-coder" / "config.yaml"
+
+
+def _load_yaml_file(path: Path) -> Dict[str, Any]:
+    if yaml is None:
+        raise RuntimeError("PyYAML is required to load a config file but is not installed")
+    with open(path, "r", encoding="utf-8") as fh:
+        return yaml.safe_load(fh) or {}
 
 
 def _apply_file(config: AppConfig, data: Dict[str, Any]) -> AppConfig:
@@ -221,28 +259,44 @@ def load_config(
 ) -> AppConfig:
     """Load configuration applying:
 
-        defaults < file < selected profile < env < CLI
+        defaults < user config < project config file < selected profile < env < CLI
+
+    ``project_dir`` should be the *project* root (see
+    ``pi_ai_coder.core.project.resolve_project_root``), not wherever
+    PI-AI-CODER happens to be installed -- callers must pass it explicitly
+    rather than relying on the ``Path.cwd()`` fallback below, which only
+    exists for standalone/test use.
 
     ``cli_overrides`` is a flat dict of dotted keys, e.g. ``{"model.path": "..."}``
     or ``{"ollama.host": "..."}``. ``profile`` selects a host profile by name
-    (see config.example.yaml); it can also come from the file's own
-    top-level ``profile:`` key or the ``PI_CODER_PROFILE`` env var -- CLI
-    wins if given explicitly.
+    (see config.example.yaml); it can also come from the user or project
+    config's top-level ``profile:`` key or the ``PI_CODER_PROFILE`` env var
+    -- CLI wins if given explicitly. Profiles defined in both the user and
+    project config are merged, with the project's definitions winning on
+    name collisions.
     """
     env = env if env is not None else os.environ
     project_dir_path = Path(project_dir) if project_dir else Path.cwd()
     config = AppConfig()
 
-    file_data: Dict[str, Any] = {}
+    user_data: Dict[str, Any] = {}
+    user_path = user_config_path(env)
+    if user_path.is_file():
+        user_data = _load_yaml_file(user_path)
+        config = _apply_file(config, user_data)
+
+    project_data: Dict[str, Any] = {}
     file_path = Path(config_path) if config_path else _find_config_file(project_dir_path)
     if file_path and file_path.is_file():
-        if yaml is None:
-            raise RuntimeError("PyYAML is required to load a config file but is not installed")
-        with open(file_path, "r", encoding="utf-8") as fh:
-            file_data = yaml.safe_load(fh) or {}
-        config = _apply_file(config, file_data)
+        project_data = _load_yaml_file(file_path)
+        config = _apply_file(config, project_data)
 
-    selected_profile = profile or env.get("PI_CODER_PROFILE") or file_data.get("profile")
+    selected_profile = (
+        profile
+        or env.get("PI_CODER_PROFILE")
+        or project_data.get("profile")
+        or user_data.get("profile")
+    )
     if selected_profile:
         profile_data = config.profiles.get(selected_profile)
         if profile_data is None:

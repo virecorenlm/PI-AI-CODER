@@ -188,9 +188,13 @@ or via a named profile (see Configuration below):
 Alongside the REPL, PI-AI-CODER now has a full-screen Textual workspace:
 
 ```bash
-./run.sh tui              # or: python assistant.py tui
-./run.sh tui --fake-model # try the UI without llama.cpp/a GGUF model
+./run.sh tui                          # or: python assistant.py tui
+./run.sh tui --fake-model             # try the UI without llama.cpp/a GGUF model
+./run.sh tui --project ~/GITHUB/other # open a different project as the workspace
 ```
+
+The workspace root defaults to the current working directory at launch --
+`--project` overrides it (see [Application Root vs. Project Root](#application-root-vs-project-root)).
 
 The workspace shows a project file tree, the conversation with streaming
 responses, a context panel, a git status pane, and a tool output pane for
@@ -408,6 +412,42 @@ lets the CLI flag win. Profile keys are flat (not nested under
 `model:`/`ollama:`); the `model` key means an Ollama tag when that
 profile's `provider` is `ollama`, otherwise a llama.cpp GGUF path.
 Profiles are optional -- nothing requires you to define any.
+
+### Application Root vs. Project Root
+
+PI-AI-CODER distinguishes two directories that must never be conflated:
+
+* **application root** -- wherever PI-AI-CODER is installed/checked out.
+  Irrelevant to project operations.
+* **project root** -- your active coding workspace. By default this is the
+  current working directory when you launch `pi-coder`/`pi-coder tui`,
+  resolved by `pi_ai_coder.core.project.resolve_project_root()`. Override
+  it with `--project <path>` (relative paths, `.`, and `~` all work; the
+  path is validated to exist and be a directory).
+
+Everything project-oriented -- the file tree, context discovery, file
+preview, add/remove context, git status/diff/branch, shell/tool execution
+`cwd`, session persistence (`.pi-ai-coder/` inside the project), and
+path-safety checks -- resolves from the project root, never from wherever
+PI-AI-CODER happens to be installed.
+
+### User-Level Config
+
+Project-level `config.yaml` is scoped to one project. If you want provider
+settings (which backend, which Ollama host/model, a named profile) to
+apply no matter which project you're in, put them in a **user-level**
+config file instead:
+
+```text
+~/.config/pi-ai-coder/config.yaml
+```
+
+(or `$XDG_CONFIG_HOME/pi-ai-coder/config.yaml` if that's set). It loads at
+lower precedence than a project's own `config.yaml` -- a project can still
+override specific settings -- and its `profiles:` entries merge with the
+project's (the project's definitions win on name collisions). This is what
+makes `pi-coder tui --profile asrock` keep working after you `cd` into a
+project that has no `config.yaml` of its own.
 
 ### System Prompt
 

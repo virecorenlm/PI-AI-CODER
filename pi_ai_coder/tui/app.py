@@ -23,6 +23,7 @@ from pi_ai_coder.config import AppConfig, load_config
 from pi_ai_coder.context.manager import ContextManager
 from pi_ai_coder.core.assistant_service import AssistantService
 from pi_ai_coder.core.events import AssistantStatus, EventType, StreamEvent
+from pi_ai_coder.core.project import ProjectRootError, resolve_project_root
 from pi_ai_coder.core.session import SessionStore
 from pi_ai_coder.models.factory import create_provider
 from pi_ai_coder.tools.files import FileTool
@@ -490,7 +491,12 @@ def run_tui(argv: Optional[List[str]] = None) -> None:
     parser = build_tui_arg_parser()
     args = parser.parse_args(argv)
 
-    project_root = str(Path(args.project).resolve())
+    try:
+        project_root = str(resolve_project_root(args.project))
+    except ProjectRootError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
     config = load_config(
         config_path=args.config,
         project_dir=project_root,

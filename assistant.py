@@ -16,7 +16,7 @@ from typing import List, Optional
 
 from pi_ai_coder.config import AppConfig, load_config
 from pi_ai_coder.context import ContextManager
-from pi_ai_coder.core import AssistantService, SessionState
+from pi_ai_coder.core import AssistantService, ProjectRootError, SessionState, resolve_project_root
 from pi_ai_coder.models import create_provider
 from pi_ai_coder.tools import FileTool, GitTool, ShellTool
 
@@ -42,10 +42,12 @@ class CodeAssistantCLI:
 
     def __init__(self,
                  config: Optional[AppConfig] = None,
-                 fake_model: bool = False):
+                 fake_model: bool = False,
+                 project_root: Optional[str] = None):
 
         self.config = config or load_config()
         self.verbose = False
+        self.project_root = resolve_project_root(project_root) if project_root else Path.cwd()
 
         self.context_manager = ContextManager(
             max_file_size_kb=self.config.project.max_file_size_kb
@@ -58,11 +60,12 @@ class CodeAssistantCLI:
             provider=provider,
             context_manager=self.context_manager,
             session=session,
+            project_root=str(self.project_root),
         )
 
-        self.shell_tool = ShellTool()
-        self.git_tool = GitTool()
-        self.file_tool = FileTool()
+        self.shell_tool = ShellTool(cwd=str(self.project_root))
+        self.git_tool = GitTool(cwd=str(self.project_root))
+        self.file_tool = FileTool(project_root=str(self.project_root))
 
     @property
     def state_context_files(self) -> List[str]:
@@ -86,7 +89,7 @@ class CodeAssistantCLI:
             patterns = args.split()
             new_files = []
             for pattern in patterns:
-                new_files.extend(str(f) for f in Path.cwd().glob(pattern))
+                new_files.extend(str(f) for f in self.project_root.glob(pattern))
             self.service.add_context_files(new_files)
             print(f"✓ {len(self.state_context_files)} files in context")
 
@@ -204,6 +207,7 @@ class CodeAssistantCLI:
         print("╔═══════════════════════════════════════════╗")
         print("║   Code Assistant - Local AI              ║")
         print("╚═══════════════════════════════════════════╝")
+        print(f"Project: {self.project_root}")
         print("\nType your question or 'help' for commands\n")
 
         while True:
@@ -261,6 +265,9 @@ Examples:
   # Use a named host profile from config.yaml
   %(prog)s --profile asrock
 
+  # Operate on a different project directory than the current one
+  %(prog)s --project ~/GITHUB/some-other-repo
+
   # Full-screen TUI workspace
   %(prog)s tui
 
@@ -273,6 +280,12 @@ Examples:
         'files',
         nargs='*',
         help='Files to include in context'
+    )
+
+    parser.add_argument(
+        '--project',
+        default='.',
+        help='Project/workspace directory to operate on (default: current directory)'
     )
 
     parser.add_argument(
@@ -357,8 +370,15 @@ def main():
 
     args = parser.parse_args()
 
+    try:
+        project_root = resolve_project_root(args.project)
+    except ProjectRootError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
     config = load_config(
         config_path=args.config,
+        project_dir=str(project_root),
         profile=args.profile,
         cli_overrides={
             "model.path": args.model,
@@ -381,7 +401,7 @@ def main():
             sys.exit(1)
 
     try:
-        app = CodeAssistantCLI(config=config, fake_model=args.fake_model)
+        app = CodeAssistantCLI(config=config, fake_model=args.fake_model, project_root=str(project_root))
         app.verbose = args.verbose
 
     except Exception as e:
