@@ -109,6 +109,10 @@ needed if you're not using it.
 
 ### Commands Reference
 
+Anything typed that isn't one of these commands is a task for the coding
+agent (see [Coding Agent](#coding-agent)), not a plain chat message --
+pass `--no-agent` at startup for the old plain-chat behavior instead.
+
 | Command | Description | Example |
 |---------|-------------|---------|
 | `add <pattern>` | Add files to context | `add *.py src/*.js` |
@@ -183,6 +187,89 @@ or via a named profile (see Configuration below):
 ./run.sh --profile asrock
 ```
 
+## Coding Agent
+
+Plain queries (anything that isn't a REPL command like `add`/`diff`/...)
+run a bounded agent loop by default, in both the CLI and the TUI:
+
+```text
+inspect relevant files -> search the codebase -> read implementation/tests
+    -> plan the change -> edit files -> run tests -> inspect failures
+    -> edit again if needed -> run tests again -> final summary + diff
+```
+
+```bash
+./run.sh -q "Add input validation to the registration endpoint and update the tests."
+./run.sh tui   # same agent loop, with visible "● action" lines per step
+```
+
+Use `--no-agent` on the CLI to get a plain one-shot chat response instead
+(no tool use, no file changes) -- the original pre-agent behavior.
+
+### How it works
+
+- **Tools** (`pi_ai_coder/agent/tools.py`): `read_file`, `read_file_range`,
+  `list_directory`, `find_files`, `search_code`, `git_status`, `git_diff`,
+  `write_file`, `create_file`, `apply_patch`, `delete_file`, `move_file`,
+  `run_command`, `run_tests`. These wrap the same `FileTool`/`GitTool`/
+  `ShellTool`/`SearchTool` used elsewhere -- no logic is duplicated for the
+  agent.
+- **Editing**: `apply_patch` takes one or more `{"old": ..., "new": ...}`
+  exact-match edits -- `old` must occur exactly once in the file's current
+  content or the whole patch fails cleanly (0 matches: "not found, reread
+  it"; 2+ matches: "ambiguous, add more context") with nothing written, so
+  a stale read never corrupts the file. This is used in preference to
+  full-file rewrites for anything but brand-new files.
+- **Protocol**: the model requests a tool by ending its response with
+  exactly `<tool_call>\n{"tool": "...", "arguments": {...}}\n</tool_call>`.
+  This is a plain-text fallback protocol (not a given provider's native
+  function-calling), parsed strictly by `pi_ai_coder/agent/parsing.py` --
+  only a well-formed block is ever executed; free-form prose that merely
+  *mentions* a tool is never treated as a call, and a malformed block is
+  reported back to the model as an error instead of crashing or guessing.
+  It works identically for llama.cpp, Ollama, and the fake test provider,
+  since the agent loop only ever sees the resulting internal `ToolCall`/
+  `ToolResult` objects (`pi_ai_coder/agent/protocol.py`), never raw
+  provider output.
+- **Permissions** (`pi_ai_coder/agent/permissions.py`): reads and ordinary
+  edits run automatically inside the project. Shell commands are EXECUTE
+  risk by default; a command matching an obviously destructive pattern
+  (`rm -rf`, `git reset --hard`, `git push`, `git commit`, `sudo`, ...)
+  escalates to DESTRUCTIVE and blocks on approval -- the CLI prompts
+  inline, the TUI shows a modal. Nothing destructive ever runs silently.
+- **Limits**: bounded by `max_iterations` (default 15) and `max_tool_calls`
+  (default 25) per task; shell commands have their own timeout (default
+  60s) and output is capped (default ~6000 chars, clearly marked when
+  truncated). Hitting a limit stops cleanly with an explanation rather than
+  running forever.
+- **Cancellation**: `Ctrl+C` (CLI) / `Ctrl+C` (TUI) cancels the current
+  task -- in-flight model generation stops immediately. A shell command
+  already running finishes on its own (bounded by its timeout); true
+  mid-command preemption isn't implemented, since it would mean changing
+  how `ShellTool` executes rather than reusing it as-is.
+- **Visibility**: every tool call shows as a compact "● action" line
+  (e.g. "● Read src/auth.py", "● Patch src/auth.py", "● Run: pytest -q").
+  A file change triggers a `FILE_CHANGED` event that refreshes the git
+  panel and project tree live in the TUI. PI-AI-CODER never commits,
+  pushes, or discards changes on its own -- review with `Ctrl+D` (or the
+  `diff` command) and commit yourself.
+- **Context**: manually `add`ed files are passed to the agent as a hint
+  ("the user already selected these as relevant") rather than dumped into
+  the prompt directly -- the agent still reads them itself via `read_file`,
+  keeping tool-based exploration as the source of truth instead of a giant
+  context window.
+
+### Known limitations (this milestone)
+
+- No checkpoint/undo system beyond git itself -- review before committing.
+- No native provider tool-calling (Ollama's `tools` API, etc.) -- the
+  text-based protocol is used uniformly instead, which works with any
+  reasonably capable local model without depending on provider-specific
+  capabilities.
+- Only one tool call is acted on per model turn (matches the system
+  prompt's instructions); extra calls in the same response are ignored
+  with a note fed back to the model.
+
 ## TUI Workspace
 
 Alongside the REPL, PI-AI-CODER now has a full-screen Textual workspace:
@@ -196,11 +283,12 @@ Alongside the REPL, PI-AI-CODER now has a full-screen Textual workspace:
 The workspace root defaults to the current working directory at launch --
 `--project` overrides it (see [Application Root vs. Project Root](#application-root-vs-project-root)).
 
-The workspace shows a project file tree, the conversation with streaming
-responses, a context panel, a git status pane, and a tool output pane for
-shell commands -- all built on the same backend as the REPL (see
-[Architecture](#architecture)), so context selection, model config, and
-tool execution behave identically in both.
+The workspace shows a project file tree, the conversation (with streaming
+prose and "● action" lines for each agent step), a context panel, a git
+status pane, and a tool output pane -- all built on the same backend as the
+REPL (see [Architecture](#architecture) and [Coding Agent](#coding-agent)),
+so context selection, model config, and tool execution behave identically
+in both.
 
 Key shortcuts (also see the in-app help screen, `F1`):
 
@@ -211,17 +299,20 @@ Key shortcuts (also see the in-app help screen, `F1`):
 | `ctrl+l` | Focus prompt composer |
 | `ctrl+g` | Focus git panel |
 | `ctrl+t` | Focus tool output |
+| `ctrl+d` | View changes (`git diff` in the tool output pane) |
 | `ctrl+r` | Reset conversation |
 | `ctrl+k` | Clear manual context |
 | `ctrl+j` | Submit prompt (most terminals send this for Ctrl+Enter) |
-| `ctrl+c` | Cancel generation |
+| `ctrl+c` | Cancel the running agent task |
 | `ctrl+q` | Quit |
 | `a` / `d` (in tree or preview) | Add / remove file from context |
+| `y` / `n` (in an approval dialog) | Allow / deny a destructive action |
 
-Limitations in this iteration: file preview is read-only (no in-place
-editing yet), and the model cannot request tools itself -- every shell,
-git, and file action is user-initiated by design (see `CLAUDE.md`'s
-Tool Permissions section).
+A destructive tool call (matching patterns in
+`pi_ai_coder/agent/permissions.py`) pauses with an approval dialog before
+running -- the agent task's worker thread blocks until you respond, the
+rest of the UI stays responsive. See [Coding Agent](#coding-agent) for the
+full permission model, tool list, and current limitations.
 
 ## Examples
 
@@ -530,20 +621,23 @@ thin front-ends over one backend, `pi_ai_coder`:
 ```
               CLI (assistant.py)      TUI (pi_ai_coder.tui.app)
                         \                    /
-                         v                  v
-                    AssistantService (pi_ai_coder.core)
-                     |         |          |          |
-                     v         v          v          v
-              ContextManager  ModelProvider   Tools    SessionState
-              (context/)      (models/)      (tools/)  (core/session.py)
-                                  |              |
-                           factory.py        ShellTool
-                          create_provider()  GitTool
-                            |    |    |      FileTool
-                            v    v    v
-                    LlamaCppProvider  OllamaProvider  FakeModelProvider
+                     AgentService (pi_ai_coder.agent) <- default for plain queries
+                         |    \
+                         |     AssistantService (pi_ai_coder.core) <- --no-agent chat,
+                         |      |         |          |                context/session mgmt
+                         v      v         v          v
+                   ToolRegistry  ContextManager  ModelProvider   SessionState
+                   (agent/tools) (context/)     (models/, via   (core/session.py)
+                         |                       factory.py)
+                         v                            |
+              ShellTool/GitTool/               LlamaCppProvider
+              FileTool/SearchTool              OllamaProvider
+              (tools/)                         FakeModelProvider
 ```
 
+- **`AgentService`** (`pi_ai_coder/agent/service.py`) is the bounded agent
+  loop -- see [Coding Agent](#coding-agent) for the full picture (tools,
+  the tool-call protocol, permissions, limits, cancellation).
 - **`ModelProvider`** (`pi_ai_coder/models/base.py`) is the swappable model
   interface -- `LlamaCppProvider` wraps llama.cpp (ChatML prompts, real
   token streaming, clean cancellation, and it looks for either `llama-cli`
@@ -557,12 +651,18 @@ thin front-ends over one backend, `pi_ai_coder`:
 - **`ContextManager`** (`pi_ai_coder/context/manager.py`) is unchanged in
   behavior from the original `context_manager.py`: ignore patterns,
   Python-aware chunking, Jaccard relevance scoring, char-budget context
-  assembly.
-- **Tools** (`pi_ai_coder/tools/`) wrap shell execution, git status/diff,
-  and file read/write behind a `RiskLevel` (`READ`/`WRITE`/`EXECUTE`/
-  `DESTRUCTIVE`) so a future permission layer has something to check
-  against. File writes validate the target path stays inside the project
-  root.
+  assembly. Used by `AssistantService` for `--no-agent` chat and to filter
+  ignored paths for the agent's file/search tools.
+- **Tools** (`pi_ai_coder/tools/`) -- `ShellTool`, `GitTool`, `FileTool`,
+  `SearchTool` -- wrap shell execution, git status/diff, file read/write/
+  create/patch/delete/move, and code search behind a `RiskLevel`
+  (`READ`/`WRITE`/`EXECUTE`/`DESTRUCTIVE`). File writes validate the
+  target path stays inside the project root (`..`, absolute paths, and
+  symlink escapes are all resolved and rejected). `pi_ai_coder/agent/
+  tools.py`'s `ToolRegistry` wraps these same instances for the agent
+  loop, adding argument validation, output capping, and dynamic risk
+  classification for shell commands -- no file/shell/git logic is
+  reimplemented there.
 - **`SessionState`/`SessionStore`** (`pi_ai_coder/core/session.py`)
   persist context files, recent prompts, and recent conversation turns as
   JSON under `.pi-ai-coder/` in the project (gitignored automatically).
@@ -586,7 +686,7 @@ anything imports them directly.
 
 ## Extending the Assistant
 
-### Adding Tools
+### Adding a REPL Command
 
 Edit `assistant.py`:
 
@@ -597,6 +697,24 @@ def handle_command(self, cmd: str) -> bool:
         # Your logic here
         pass
 ```
+
+### Adding an Agent Tool
+
+Register it in `pi_ai_coder/agent/tools.py`'s `ToolRegistry._register_all`:
+
+```python
+self._reg(
+    "my_tool",
+    "my_tool(arg: str) -> what it returns, for the system prompt.",
+    lambda a: self.file_tool.some_method(_require_str(a, "arg")),
+)
+```
+
+Add its risk level in `pi_ai_coder/agent/permissions.py`'s `TOOL_RISK` (or
+handle it dynamically like `run_command`/`run_tests` if the risk depends on
+the arguments). Implement the actual behavior on the underlying
+`FileTool`/`GitTool`/`ShellTool`/`SearchTool` if it doesn't exist yet --
+never inline new file/shell/git logic directly in the agent layer.
 
 ### Custom Prompts
 

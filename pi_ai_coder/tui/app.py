@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import threading
 from pathlib import Path
 from typing import Iterable, List, Optional
 
@@ -19,17 +20,23 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
 from textual.widgets import Footer
 
+from pi_ai_coder.agent.display import LiveProseFilter, describe_tool_call
+from pi_ai_coder.agent.events import AgentEvent, AgentEventType
+from pi_ai_coder.agent.protocol import ToolCall
+from pi_ai_coder.agent.service import AgentService
+from pi_ai_coder.agent.tools import ToolRegistry
 from pi_ai_coder.config import AppConfig, load_config
 from pi_ai_coder.context.manager import ContextManager
 from pi_ai_coder.core.assistant_service import AssistantService
-from pi_ai_coder.core.events import AssistantStatus, EventType, StreamEvent
 from pi_ai_coder.core.project import ProjectRootError, resolve_project_root
 from pi_ai_coder.core.session import SessionStore
 from pi_ai_coder.models.factory import create_provider
+from pi_ai_coder.tools.base import RiskLevel
 from pi_ai_coder.tools.files import FileTool
 from pi_ai_coder.tools.git import GitTool
+from pi_ai_coder.tools.search import SearchTool
 from pi_ai_coder.tools.shell import ShellTool
-from pi_ai_coder.tui.screens import CommandInputScreen, HelpScreen, PreviewScreen
+from pi_ai_coder.tui.screens import ApprovalScreen, CommandInputScreen, HelpScreen, PreviewScreen
 from pi_ai_coder.tui.widgets import (
     ContextPanel,
     ConversationView,
@@ -120,6 +127,33 @@ Screen {
     border: solid $accent;
     padding: 1 2;
 }
+
+#approval-dialog {
+    align: center middle;
+    width: 70%;
+    height: auto;
+    background: $panel;
+    border: solid $warning;
+    padding: 1 2;
+}
+
+#approval-buttons {
+    height: auto;
+    align: right middle;
+    padding-top: 1;
+}
+
+#approval-buttons Button {
+    margin-left: 1;
+}
+
+.tool-action {
+    margin: 0 0 0 0;
+}
+
+.tool-output {
+    margin: 0 0 1 0;
+}
 """
 
 
@@ -135,6 +169,7 @@ class PiAiCoderApp(App):
         Binding("ctrl+t", "focus_tool_output", "Tools"),
         Binding("ctrl+r", "reset_conversation", "Reset"),
         Binding("ctrl+k", "clear_context", "Clear ctx"),
+        Binding("ctrl+d", "show_git_diff", "View changes"),
         Binding("f1", "show_help", "Help"),
         Binding("ctrl+c", "cancel_generation", "Cancel", show=False),
         Binding("ctrl+q", "quit", "Quit"),
@@ -165,7 +200,23 @@ class PiAiCoderApp(App):
 
         self.shell_tool = ShellTool(cwd=str(self.project_root))
         self.git_tool = GitTool(cwd=str(self.project_root))
-        self.file_tool = FileTool(project_root=str(self.project_root))
+        self.file_tool = FileTool(project_root=str(self.project_root), should_ignore=self.context_manager.should_ignore)
+        self.search_tool = SearchTool(project_root=str(self.project_root), should_ignore=self.context_manager.should_ignore)
+
+        self.tool_registry = ToolRegistry(
+            project_root=str(self.project_root),
+            file_tool=self.file_tool,
+            git_tool=self.git_tool,
+            search_tool=self.search_tool,
+        )
+        self.agent = AgentService(
+            provider=self.provider,
+            tools=self.tool_registry,
+            session=self.session,
+            project_root=str(self.project_root),
+            approve=self._approve_tool_call,
+        )
+        self._current_prose_filter = LiveProseFilter()
 
     # -- layout --------------------------------------------------------
 
@@ -257,49 +308,88 @@ class PiAiCoderApp(App):
         text = message.text
         self.query_one(ConversationView).add_user_message(text)
         self._generating = True
-        self._refresh_status_bar("generating...")
-        self._run_generation(text)
+        self._current_prose_filter = LiveProseFilter()
+        self._refresh_status_bar("thinking...")
+        self._run_agent_task(text)
 
     @work(thread=True, exclusive=True, group="generation")
-    def _run_generation(self, prompt: str) -> None:
-        for event in self.service.stream_chat(prompt):
-            self.call_from_thread(self._handle_stream_event, event)
-        self.call_from_thread(self._on_generation_finished)
+    def _run_agent_task(self, user_message: str) -> None:
+        hint_files = self.session.context_files or None
+        for event in self.agent.run_task(user_message, hint_files=hint_files):
+            self.call_from_thread(self._handle_agent_event, event)
+        self.call_from_thread(self._on_agent_task_finished)
 
-    def _handle_stream_event(self, event: StreamEvent) -> None:
+    def _handle_agent_event(self, event: AgentEvent) -> None:
         conversation = self.query_one(ConversationView)
+        t = event.type
 
-        if event.type == EventType.STATUS:
-            status = event.data.get("status")
-            if status == AssistantStatus.BUILDING_CONTEXT:
-                self._refresh_status_bar("building context...")
-                if "files" in event.data:
-                    auto_discovered = event.data["files"] if event.data.get("auto_discovered") else None
-                    self._refresh_context_panel(
-                        auto_discovered=auto_discovered,
-                        context_chars=event.data.get("context_chars", 0),
-                    )
-            elif status == AssistantStatus.GENERATING:
-                conversation.start_assistant_message()
-                self._refresh_status_bar("generating...")
-        elif event.type == EventType.TOKEN:
-            conversation.append_assistant_token(event.text)
-        elif event.type == EventType.ERROR:
-            conversation.finish_assistant_message()
-            conversation.add_error(event.text or "Unknown model error")
-        elif event.type == EventType.CANCELLED:
-            conversation.finish_assistant_message()
-            conversation.add_system_message("Generation cancelled")
+        if t == AgentEventType.TOKEN:
+            visible = self._current_prose_filter.feed(event.data["text"])
+            if visible:
+                conversation.append_assistant_token(visible)
 
-    def _on_generation_finished(self) -> None:
-        self.query_one(ConversationView).finish_assistant_message()
+        elif t == AgentEventType.TOOL_REQUESTED:
+            conversation.finish_assistant_message()
+            conversation.add_tool_action(describe_tool_call(event.data["tool"], event.data["arguments"]))
+            self._current_prose_filter = LiveProseFilter()
+            self._refresh_status_bar(f"running {event.data['tool']}...")
+
+        elif t == AgentEventType.APPROVAL_REQUIRED:
+            self._refresh_status_bar("waiting for approval...")
+
+        elif t == AgentEventType.TOOL_FINISHED:
+            if event.data["tool"] in ("run_command", "run_tests"):
+                output = (event.data.get("output") or "").strip()
+                if output:
+                    conversation.add_tool_output(output)
+            if not event.data["success"]:
+                conversation.add_error(event.data.get("error") or "Tool failed")
+            self._refresh_status_bar("thinking...")
+
+        elif t == AgentEventType.FILE_CHANGED:
+            self.context_manager.invalidate(event.data.get("path"))
+            self._refresh_git_panel()
+            self.query_one(ProjectTree).reload()
+
+        elif t == AgentEventType.ITERATION_LIMIT:
+            conversation.add_system_message(f"Stopped: {event.data['reason']} limit reached")
+
+        elif t == AgentEventType.FAILED:
+            conversation.finish_assistant_message()
+            conversation.add_error(event.data.get("error", "Agent task failed"))
+
+        elif t == AgentEventType.CANCELLED:
+            conversation.finish_assistant_message()
+            conversation.add_system_message("Task cancelled")
+
+        elif t == AgentEventType.COMPLETED:
+            conversation.finish_assistant_message()
+
+    def _on_agent_task_finished(self) -> None:
         self._generating = False
         self._refresh_status_bar("idle")
         self._save_session()
 
+    def _approve_tool_call(self, tool_call: ToolCall, risk: RiskLevel) -> bool:
+        """Called from the agent's worker thread. Blocks that thread (never
+        the UI thread) until the user responds to an approval modal shown on
+        the main thread."""
+        result: dict = {}
+        done = threading.Event()
+
+        def _show() -> None:
+            def _on_result(approved: Optional[bool]) -> None:
+                result["approved"] = bool(approved)
+                done.set()
+            self.push_screen(ApprovalScreen(tool_call.name, tool_call.arguments), callback=_on_result)
+
+        self.call_from_thread(_show)
+        done.wait()
+        return result.get("approved", False)
+
     def action_cancel_generation(self) -> None:
         if self._generating:
-            self.service.cancel()
+            self.agent.cancel()
 
     # -- context file management -----------------------------------------
 

@@ -23,16 +23,26 @@ pi-code-assistant/
 │   │   ├── base.py               # RiskLevel, ToolResult, safe path resolution
 │   │   ├── shell.py              # ShellTool
 │   │   ├── git.py                # GitTool (read-only status/diff/log)
-│   │   └── files.py              # FileTool (read/save, project-boundary enforced)
+│   │   ├── files.py              # FileTool (read/write/create/apply_patch/delete/move/list/find, project-boundary enforced)
+│   │   └── search.py             # SearchTool (ripgrep, Python fallback)
+│   ├── agent/                    # the coding agent
+│   │   ├── protocol.py           # ToolCall/ToolResult/ParsedTurn -- provider-independent types
+│   │   ├── events.py             # AgentEvent/AgentEventType
+│   │   ├── parsing.py            # parse_tool_calls() -- the <tool_call> fallback protocol parser
+│   │   ├── permissions.py        # classify_command(), TOOL_RISK -- READ/WRITE/EXECUTE/DESTRUCTIVE
+│   │   ├── tools.py              # ToolRegistry -- wires tools/* into agent-callable tools
+│   │   ├── prompt.py             # build_agent_system_prompt() -- tool list + protocol instructions
+│   │   ├── display.py            # describe_tool_call(), LiveProseFilter (shared CLI/TUI rendering)
+│   │   └── service.py            # AgentService -- the bounded inspect/edit/test/summarize loop
 │   ├── core/
 │   │   ├── events.py             # StreamEvent/EventType/AssistantStatus
 │   │   ├── project.py            # resolve_project_root() -- app root vs. project root
 │   │   ├── session.py            # SessionState + SessionStore (JSON persistence, project-scoped)
-│   │   └── assistant_service.py  # AssistantService: ties it all together
+│   │   └── assistant_service.py  # AssistantService: plain chat + session/context management
 │   └── tui/
 │       ├── app.py                # PiAiCoderApp (Textual)
 │       ├── widgets/               # ProjectTree, ConversationView, PromptComposer, ...
-│       └── screens/               # PreviewScreen, HelpScreen, CommandInputScreen
+│       └── screens/               # PreviewScreen, HelpScreen, CommandInputScreen, ApprovalScreen
 │
 ├── tests/                        # pytest suite (no real model required)
 │
@@ -91,19 +101,29 @@ pi-code-assistant/
 - `fake_provider.py`: deterministic streaming backend used by `--fake-model` and the test suite
 
 **pi_ai_coder/tools/**
-- `shell.py` (`ShellTool`), `git.py` (`GitTool`, read-only), `files.py` (`FileTool`, path-boundary enforced)
+- `shell.py` (`ShellTool`), `git.py` (`GitTool`, read-only), `files.py` (`FileTool`, path-boundary enforced), `search.py` (`SearchTool`, ripgrep + Python fallback)
 - `base.py`: shared `RiskLevel` (READ/WRITE/EXECUTE/DESTRUCTIVE) and `ToolResult`
+- `FileTool` covers read/write/create_file/apply_patch/delete_file/move_file/list_directory/find_files/read_file_range -- every method resolves and validates the path stays inside the project root first
+
+**pi_ai_coder/agent/** -- the coding agent (see `CLAUDE.md`'s Agent Architecture section)
+- `protocol.py`: `ToolCall`/`ToolResult`/`ParsedTurn` -- the internal, provider-independent representation the loop operates on
+- `parsing.py`: `parse_tool_calls()` -- strictly parses the `<tool_call>{...}</tool_call>` fallback protocol; malformed blocks are reported as errors, never executed or silently dropped
+- `permissions.py`: `classify_command()` (pattern-based EXECUTE vs. DESTRUCTIVE for shell commands) and `TOOL_RISK` (static risk per tool)
+- `tools.py`: `ToolRegistry` -- registers all agent tools (read_file, read_file_range, list_directory, find_files, search_code, git_status, git_diff, write_file, create_file, apply_patch, delete_file, move_file, run_command, run_tests), dispatching to the `pi_ai_coder/tools/` instances with argument validation and output capping
+- `prompt.py`: builds the agent's system prompt from the registered tool list
+- `display.py`: `describe_tool_call()` and `LiveProseFilter` (suppresses raw `<tool_call>` JSON from live-streamed output) -- shared by the CLI and TUI so agent actions render consistently
+- `service.py`: `AgentService.run_task()` -- the bounded loop (`max_iterations`, `max_tool_calls`), yielding `AgentEvent`s; takes an `approve` callback for DESTRUCTIVE tool calls
 
 **pi_ai_coder/core/**
-- `assistant_service.py`: `AssistantService` -- context resolution, message assembly, blocking/streaming chat
+- `assistant_service.py`: `AssistantService` -- plain one-shot/streaming chat (used directly for `--no-agent`, and for session/context management -- add/remove/clear context files, reset -- shared with the agent)
 - `project.py`: `resolve_project_root()` -- the one canonical project/workspace root, validated to exist and be a directory; the CLI and TUI both resolve it once and pass it into every project-oriented component (never scattered `Path.cwd()` calls)
 - `session.py`: `SessionState`/`SessionStore` -- JSON persistence under `<project_root>/.pi-ai-coder/`, so two projects never share session state
 - `events.py`: the `StreamEvent`/`EventType`/`AssistantStatus` vocabulary used to stream activity to a UI
 
 **pi_ai_coder/tui/**
-- `app.py`: the Textual `PiAiCoderApp`
-- `widgets/`: `ProjectTree`, `ConversationView`, `PromptComposer`, `ContextPanel`, `ToolOutput`, `GitPanel`, `StatusBar`
-- `screens/`: `PreviewScreen` (read-only file preview), `HelpScreen`, `CommandInputScreen` (modal text input)
+- `app.py`: the Textual `PiAiCoderApp` -- prompt submission runs `AgentService.run_task()` in a worker thread, cross-thread `ApprovalScreen` blocking for DESTRUCTIVE calls
+- `widgets/`: `ProjectTree`, `ConversationView` (now with `add_tool_action`/`add_tool_output` for agent steps), `PromptComposer`, `ContextPanel`, `ToolOutput`, `GitPanel`, `StatusBar`
+- `screens/`: `PreviewScreen` (read-only file preview), `HelpScreen`, `CommandInputScreen` (modal text input), `ApprovalScreen` (modal y/n for destructive tool calls)
 
 ### Setup Files
 
@@ -275,10 +295,14 @@ Done in this iteration:
 - [x] Model discovery (`models`/`model <name>` commands, "List models"/"Change model" in the TUI)
 - [x] Canonical project/workspace root (`pi_ai_coder/core/project.py`), `--project` on both the CLI and `tui`, decoupled from PI-AI-CODER's own install directory
 - [x] User-level config (`~/.config/pi-ai-coder/config.yaml`) so provider/profile setup persists across projects
+- [x] A real bounded agent/tool loop (`pi_ai_coder/agent/`): search/read/edit (create/patch/write/delete/move)/run commands, iterate, summarize -- the default behavior for a plain query now, with `--no-agent` as the opt-out
+- [x] A provider-independent tool-calling protocol (text-based `<tool_call>` fallback, works identically for llama.cpp, Ollama, and the fake provider)
+- [x] Destructive-action approval gate (pattern-based shell command classification; CLI prompt / TUI modal)
 
 Still potential improvements:
-- [ ] In-place file editing (preview is currently read-only)
-- [ ] Model-requested tool calls behind a real permission/approval system
+- [ ] In-place file editing in the preview pane (the agent's own tools are how edits happen today)
+- [ ] Native provider tool-calling as an optional fast path alongside the text protocol
+- [ ] A checkpoint/undo layer beyond bare git
 - [ ] An OpenAI-compatible local-server provider
 - [ ] Embeddings for semantic file search
 - [ ] Web UI (optional)
@@ -302,6 +326,12 @@ tests/
 ├── test_import_order.py        # guards against a circular-import regression
 ├── test_project_root.py        # app-root vs. project-root, launched via subprocess
 ├── test_assistant_service.py
+├── test_agent_protocol.py      # <tool_call> parsing, malformed-call rejection
+├── test_agent_permissions.py   # shell command risk classification
+├── test_agent_tools.py         # ToolRegistry: path/symlink safety, apply_patch, search_code, run_command
+├── test_agent_service.py       # the bounded loop: multi-step, limits, cancellation, approval
+├── test_agent_cli.py           # agent wired into assistant.py, via real subprocess
+├── test_agent_tui.py           # agent wired into the TUI, headless Pilot tests
 └── test_tui_smoke.py           # headless Textual Pilot tests
 ```
 

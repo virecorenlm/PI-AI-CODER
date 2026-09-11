@@ -14,11 +14,15 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
+from pi_ai_coder.agent import AgentEventType, AgentService, ToolRegistry, describe_tool_call
+from pi_ai_coder.agent.display import LiveProseFilter
+from pi_ai_coder.agent.protocol import ToolCall
 from pi_ai_coder.config import AppConfig, load_config
 from pi_ai_coder.context import ContextManager
 from pi_ai_coder.core import AssistantService, ProjectRootError, SessionState, resolve_project_root
 from pi_ai_coder.models import create_provider
-from pi_ai_coder.tools import FileTool, GitTool, ShellTool
+from pi_ai_coder.tools import FileTool, GitTool, SearchTool, ShellTool
+from pi_ai_coder.tools.base import RiskLevel
 
 
 class CodeAssistantCLI:
@@ -43,10 +47,12 @@ class CodeAssistantCLI:
     def __init__(self,
                  config: Optional[AppConfig] = None,
                  fake_model: bool = False,
-                 project_root: Optional[str] = None):
+                 project_root: Optional[str] = None,
+                 use_agent: bool = True):
 
         self.config = config or load_config()
         self.verbose = False
+        self.use_agent = use_agent
         self.project_root = resolve_project_root(project_root) if project_root else Path.cwd()
 
         self.context_manager = ContextManager(
@@ -65,7 +71,30 @@ class CodeAssistantCLI:
 
         self.shell_tool = ShellTool(cwd=str(self.project_root))
         self.git_tool = GitTool(cwd=str(self.project_root))
-        self.file_tool = FileTool(project_root=str(self.project_root))
+        self.file_tool = FileTool(project_root=str(self.project_root), should_ignore=self.context_manager.should_ignore)
+        self.search_tool = SearchTool(project_root=str(self.project_root), should_ignore=self.context_manager.should_ignore)
+
+        self.tool_registry = ToolRegistry(
+            project_root=str(self.project_root),
+            file_tool=self.file_tool,
+            git_tool=self.git_tool,
+            search_tool=self.search_tool,
+        )
+        self.agent = AgentService(
+            provider=provider,
+            tools=self.tool_registry,
+            session=session,
+            project_root=str(self.project_root),
+            approve=self._approve_tool_call,
+        )
+
+    def _approve_tool_call(self, tool_call: ToolCall, risk: RiskLevel) -> bool:
+        print(f"\n⚠ Approval required ({risk.value}): {describe_tool_call(tool_call.name, tool_call.arguments)}")
+        try:
+            answer = input("  Allow this? [y/N]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return False
+        return answer in ("y", "yes")
 
     @property
     def state_context_files(self) -> List[str]:
@@ -131,11 +160,12 @@ class CodeAssistantCLI:
                 print(f"Error: command failed (exit code {result.exit_code})", file=sys.stderr)
 
         elif command == 'save':
-            if not self.service.last_code_blocks:
+            code_blocks = self.agent.last_code_blocks if self.use_agent else self.service.last_code_blocks
+            if not code_blocks:
                 print("No code blocks in last response")
             else:
                 filename = args or "output.txt"
-                code = self.service.last_code_blocks[0]['code']
+                code = code_blocks[0]['code']
                 # The user typed this exact path, so it's explicit intent --
                 # not subject to the project-boundary restriction (which
                 # exists for automated/model-driven writes).
@@ -180,7 +210,13 @@ class CodeAssistantCLI:
         return True
 
     def process_query(self, query: str):
-        """Process a user query"""
+        """Process a user query: runs the full agent loop (inspect, edit,
+        run commands, iterate) by default, or plain one-shot chat with
+        --no-agent."""
+        if self.use_agent:
+            self.run_agent_task(query)
+            return
+
         files, auto_used = self.service.resolve_context_files(query)
 
         if auto_used and files and self.verbose:
@@ -201,6 +237,57 @@ class CodeAssistantCLI:
 
         except Exception as e:
             print(f"\n✗ Error: {e}", file=sys.stderr)
+
+    def run_agent_task(self, query: str):
+        """Run the agent loop for one task, rendering its events to the terminal."""
+        print()
+        prose_filter = LiveProseFilter()
+        streamed_any = False
+
+        try:
+            for event in self.agent.run_task(query, hint_files=self.service.session.context_files or None):
+                t = event.type
+
+                if t == AgentEventType.TOKEN:
+                    visible = prose_filter.feed(event.data["text"])
+                    if visible:
+                        print(visible, end="", flush=True)
+                        streamed_any = True
+
+                elif t == AgentEventType.TOOL_REQUESTED:
+                    if streamed_any:
+                        print()
+                        streamed_any = False
+                    print(f"● {describe_tool_call(event.data['tool'], event.data['arguments'])}")
+                    prose_filter = LiveProseFilter()
+
+                elif t == AgentEventType.TOOL_FINISHED:
+                    if event.data["tool"] in ("run_command", "run_tests"):
+                        output = (event.data.get("output") or "").strip()
+                        if output:
+                            for line in output.splitlines():
+                                print(f"  {line}")
+                    if not event.data["success"]:
+                        print(f"  ✗ {event.data.get('error') or 'failed'}")
+
+                elif t == AgentEventType.ITERATION_LIMIT:
+                    print(f"  (stopped: {event.data['reason']} limit reached)")
+
+                elif t == AgentEventType.FAILED:
+                    if streamed_any:
+                        print()
+                    print(f"✗ {event.data.get('error', 'Agent task failed')}", file=sys.stderr)
+
+                elif t == AgentEventType.CANCELLED:
+                    print("\n(cancelled)")
+
+                elif t == AgentEventType.COMPLETED:
+                    if streamed_any:
+                        print()
+
+        except KeyboardInterrupt:
+            self.agent.cancel()
+            print("\n(cancelled)")
 
     def interactive_mode(self):
         """Run interactive REPL"""
@@ -273,6 +360,10 @@ Examples:
 
   # Try the TUI/CLI without a real model
   %(prog)s tui --fake-model
+
+  # Plain queries run the full agent loop (inspect/edit/test) by default;
+  # --no-agent falls back to simple one-shot chat with no tool use
+  %(prog)s -q "Add input validation to the registration endpoint" --no-agent
         """
     )
 
@@ -355,6 +446,12 @@ Examples:
         help='Use a deterministic fake model backend (no llama.cpp/GGUF/Ollama needed) for testing'
     )
 
+    parser.add_argument(
+        '--no-agent',
+        action='store_true',
+        help='Disable the agent/tool loop; queries get a plain one-shot chat response instead'
+    )
+
     return parser
 
 
@@ -401,7 +498,12 @@ def main():
             sys.exit(1)
 
     try:
-        app = CodeAssistantCLI(config=config, fake_model=args.fake_model, project_root=str(project_root))
+        app = CodeAssistantCLI(
+            config=config,
+            fake_model=args.fake_model,
+            project_root=str(project_root),
+            use_agent=not args.no_agent,
+        )
         app.verbose = args.verbose
 
     except Exception as e:

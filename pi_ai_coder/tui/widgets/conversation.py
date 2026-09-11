@@ -52,6 +52,18 @@ class ConversationView(VerticalScroll):
         self.mount(Static(text, classes="message tool-message"))
         self.scroll_end(animate=False)
 
+    def add_tool_action(self, text: str) -> None:
+        """A compact "● Read src/auth.py" style agent-action marker."""
+        self._assistant_widget = None
+        self.mount(Static(f"[cyan]●[/cyan] {text}", classes="message tool-action"))
+        self.scroll_end(animate=False)
+
+    def add_tool_output(self, text: str) -> None:
+        """Indented raw tool output (e.g. test results) under the most recent action."""
+        indented = "\n".join(f"  {line}" for line in text.splitlines())
+        self.mount(Static(f"[dim]{indented}[/dim]", classes="message tool-output"))
+        self.scroll_end(animate=False)
+
     def add_error(self, text: str) -> None:
         self.mount(Static(f"[bold red]✗ {text}[/bold red]", classes="message error-message"))
         self.scroll_end(animate=False)

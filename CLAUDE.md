@@ -293,68 +293,73 @@ Do not create unnecessary abstractions just to satisfy a directory layout.
 
 # Tool System
 
-Existing commands should gradually become reusable tools.
+Implemented: `ShellTool`, `GitTool`, `FileTool` (`pi_ai_coder/tools/`) and
+`SearchTool` (`pi_ai_coder/tools/search.py`, ripgrep with a Python
+fallback). `FileTool` covers read/write/create/apply_patch/delete/move/
+list_directory/find_files/read_file_range, all path-safety checked.
 
-Current capabilities include:
+`pi_ai_coder/agent/tools.py`'s `ToolRegistry` wraps these same instances
+for the agent loop -- it adds argument validation, output capping, and
+risk classification, but contains no file/shell/git logic of its own. The
+CLI and TUI construct one `FileTool`/`GitTool`/`ShellTool`/`SearchTool` set
+per project and hand it to both `AssistantService` (chat/context) and
+`ToolRegistry`/`AgentService` (the agent loop) -- never duplicated.
 
-* file context management
-* shell execution
-* Git diff
-* saving generated code
-* project discovery
-
-Move toward interfaces such as:
-
-```python
-ShellTool
-GitTool
-FileTool
-ContextTool
-```
-
-The existing CLI and future TUI should use the same underlying tool implementations.
-
-Do not duplicate shell or Git logic separately in each interface.
+Do not duplicate shell, Git, or file logic in the agent layer, the CLI, or
+the TUI -- add capability to the tool classes in `pi_ai_coder/tools/` and
+expose it through `ToolRegistry` if the agent needs it too.
 
 ---
 
-# Future Agent Architecture
+# Agent Architecture
 
-PI-AI-CODER is intended to eventually support an agent loop.
-
-The future flow may look like:
+PI-AI-CODER has a real agent/tool loop: `pi_ai_coder/agent/`. This is now
+the default behavior for a plain query in both the CLI and the TUI (opt out
+with `--no-agent` on the CLI for one-shot chat with no tool use).
 
 ```text
 User task
     |
     v
-Model reasons about task
+AgentService.run_task() (pi_ai_coder/agent/service.py)
     |
     v
-Model requests tool
+model.stream_chat() -- text-based <tool_call>{...}</tool_call> protocol,
+    |                  parsed by pi_ai_coder/agent/parsing.py; provider-
+    |                  independent (works identically for llama.cpp, Ollama,
+    |                  and the fake test provider -- see protocol.py's
+    |                  ToolCall/ToolResult/AgentEvent types)
+    v
+ToolRegistry.classify() -- risk check (pi_ai_coder/agent/permissions.py)
     |
     v
-Permission system
+DESTRUCTIVE? -> approval callback (blocks; CLI prompts, TUI shows a modal)
     |
     v
-Tool executes
-    |
+ToolRegistry.execute() -- dispatches to the existing FileTool/GitTool/
+    |                      ShellTool/SearchTool (no logic duplicated here)
     v
-Result returned to model
-    |
-    v
-Model continues
+Result fed back to the model; loop continues until it responds with plain
+prose (no tool_call block), or a bounded limit is hit (max_iterations,
+max_tool_calls) -- never unbounded autonomy.
 ```
 
-Do not implement unrestricted autonomy.
+The loop only ever emits `AgentEvent`s (`pi_ai_coder/agent/events.py`) --
+it never prints or renders anything itself; the CLI and TUI each render
+those events (compact "● Read src/auth.py" action lines, streamed prose,
+a final summary).
 
-Build foundations that allow this safely later.
+Native provider tool-calling (Ollama's `tools` API, etc.) is not used --
+the text-based fallback protocol is used uniformly for every provider so
+the agent never depends on one provider's capabilities. This remains a
+clean extension point if a provider-specific fast path is ever added later
+(it would produce the same internal `ToolCall` objects).
 
 ---
 
 # Tool Permissions
 
-Use a simple conceptual risk model:
+The risk model described in the original design is implemented as-is:
 
 ```text
 READ
@@ -363,58 +368,50 @@ EXECUTE
 DESTRUCTIVE
 ```
 
-General policy:
+`pi_ai_coder/agent/permissions.py` implements the policy below; only
+DESTRUCTIVE ever blocks on an approval callback.
 
 ## READ
 
-Examples:
+Examples: read_file, read_file_range, list_directory, find_files,
+search_code, git_status, git_diff.
 
-* read project file
-* list directory
-* inspect Git status
-* inspect Git diff
-
-These can generally be allowed automatically inside the active project.
+Allowed automatically inside the active project.
 
 ## WRITE
 
-Examples:
+Examples: write_file, create_file, apply_patch, delete_file (single files
+only -- see below), move_file.
 
-* create file
-* modify file
-* apply patch
-
-Require clear user intent.
-
-Future agent-driven writes should require approval unless a permission policy explicitly allows them.
+Allowed automatically during an active coding task, inside the project
+boundary -- these are expected, ordinary coding-agent actions. The TUI
+visibly reports every file it touches (a "● Patch path" action line, a
+FILE_CHANGED event that refreshes the git panel/project tree). Do not add
+a confirmation prompt for ordinary edits -- that would defeat the point.
 
 ## EXECUTE
 
-Examples:
+Examples: run_command/run_tests running things like pytest, ruff, mypy,
+npm test, cargo test, git status/diff -- see `TOOL_RISK`/`classify_command`
+for the full policy, not a hard-coded allowlist.
 
-* run pytest
-* run Python
-* run build commands
-* run shell commands
-
-During the current stage, arbitrary shell execution should originate from the user.
-
-Future model-requested execution should pass through approval.
+Allowed automatically during an active coding task, with the project as
+cwd (or an explicit project-relative `cwd` argument). Output is captured
+and capped; a command that looks destructive is escalated below.
 
 ## DESTRUCTIVE
 
-Examples:
+Examples: `rm -rf`, `git reset --hard`, `git clean -f*`, `git push`
+(with or without `--force`), `git commit`, `git rebase`, `git merge`,
+`git checkout --`/`git restore`, `sudo`, `shutdown`/`reboot`, piping a
+remote script into a shell, and bulk/directory deletion (the agent's
+`delete_file` tool refuses directories entirely for this reason -- a
+directory delete must go through an approved shell command).
 
-* deleting files
-* `git reset --hard`
-* removing directories
-* force pushes
-* destructive database actions
-* overwriting unrelated files
-
-Never execute automatically.
-
-Require explicit user approval.
+Never executed automatically. `AgentService` calls the injected `approve`
+callback and blocks until the user responds -- the CLI prompts inline, the
+TUI shows `ApprovalScreen`. A denial is fed back to the model as a failed
+tool result instructing it not to retry that exact command.
 
 ---
 
@@ -515,6 +512,13 @@ and one-shot querying.
 Refactoring may change internal implementation, but existing user behavior should remain functional whenever practical.
 
 If compatibility must be broken, document exactly why.
+
+**Documented exception:** plain queries (no leading command) now run the
+full agent loop by default instead of returning a single plain-chat
+response -- this is the intended behavior of the agent milestone, not an
+accident. `--no-agent` restores the old plain one-shot-chat behavior
+exactly. All of `add`/`remove`/`files`/`clear`/`auto`/`exec`/`save`/`diff`/
+`reset`/`help`/`quit` are unchanged and unaffected either way.
 
 ---
 
@@ -956,9 +960,11 @@ A bad change:
 
 # Current Priority
 
-The current major development priority is turning PI-AI-CODER into a real coding workspace.
+The workspace foundation (items 1-10 below) is done. The current major
+development priority is polishing the agent loop itself -- not building
+another foundational layer.
 
-The immediate direction is:
+Completed foundation:
 
 1. Separate the backend from the current CLI.
 2. Preserve existing CLI behavior.
@@ -970,8 +976,20 @@ The immediate direction is:
 8. Integrate shell/tool output.
 9. Integrate Git status and diff.
 10. Add session persistence and polish.
+11. Portable project roots, multi-provider support (llama.cpp + Ollama), host profiles.
+12. A real bounded agent/tool loop (`pi_ai_coder/agent/`): inspect, search, read,
+    edit (write/create/patch/delete/move), run commands/tests, iterate, summarize --
+    this is the default behavior for a plain query now, not a separate opt-in mode.
 
-Do not jump ahead into autonomous agent execution until the workspace foundation is solid.
+Still open, in roughly this order:
+
+* A checkpoint/undo layer beyond bare git (explicitly deferred, not a blocker).
+* In-place file editing in the preview pane (currently read-only).
+* A native provider tool-calling fast path, if it ever earns its complexity
+  over the text-based fallback protocol that already works uniformly.
+
+Do not regress the agent loop back to unrestricted/unbounded autonomy, and
+do not remove the approval gate on DESTRUCTIVE actions while "polishing."
 
 ---
 

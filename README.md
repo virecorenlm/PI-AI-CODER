@@ -26,16 +26,50 @@ chmod +x setup.sh
 
 ## ✨ Features
 
-- **🤖 Smart AI Assistant**: Qwen2.5-Coder 7B model optimized for code
+- **🧑‍💻 Real Coding Agent**: give it a task in plain English and it inspects
+  the repo, searches code, reads files, edits them, runs tests, and iterates
+  until done -- not just a chat window (see [Coding Agent](#-coding-agent))
 - **📁 File-Aware**: Automatically reads and understands your codebase
 - **💬 Conversational**: Multi-turn conversations with memory
 - **⚡ Optimized**: Tuned per host via config -- ~5-10 tokens/second on a Pi 5, much faster on a workstation
 - **🔌 Pluggable Model Backends**: llama.cpp or Ollama, chosen by config/CLI flag, no code changes
-- **🔧 Tool Integration**: Shell commands, git, file operations
+- **🔧 Tool Integration**: Shell commands, git, file read/write/patch, code search
 - **🖥️ Full-Screen TUI**: A Textual workspace with a file tree, streaming
   chat, context panel, git status, and tool output (`./run.sh tui`)
 - **🎯 Zero Cost**: Completely local, no API fees
 - **🔒 Private**: Your code never leaves your machine
+
+## 🧑‍💻 Coding Agent
+
+Type a task and PI-AI-CODER does the work, not just describes it:
+
+```text
+> Add input validation to the registration endpoint and update the tests.
+
+● Read src/auth.py
+● Read tests/test_auth.py
+● Search "register_user"
+● Patch src/auth.py
+● Patch tests/test_auth.py
+● Run: pytest tests/test_auth.py
+  9 passed
+
+Done. Added email/password validation to register_user() and covered it
+with two new test cases.
+```
+
+It reads/searches/edits files (create, patch, write, delete, move) and
+runs shell commands (tests, linters, builds) inside the project boundary,
+using the same `ShellTool`/`GitTool`/`FileTool` the rest of the app uses --
+nothing is duplicated. Ordinary reads and edits happen automatically;
+anything that looks destructive (`rm -rf`, `git reset --hard`, force
+pushes, `git commit`/`push`, ...) pauses for your approval first. It never
+commits, pushes, or discards your changes -- review with `Ctrl+D` (or
+`diff`/`git_diff`) and commit yourself when you're happy.
+
+Plain queries run this agent loop by default in both the CLI and the TUI.
+Add `--no-agent` to the CLI for a plain one-shot chat response with no
+tool use.
 
 ## 🔌 Model Providers
 
@@ -237,6 +271,9 @@ chmod +x *.py *.sh
 # Verbose mode
 ./run.sh -v  # Shows context size, timing
 
+# Plain chat only, no agent/tool use for this query
+./run.sh -q "Explain quicksort" --no-agent
+
 # Help
 ./run.sh --help
 ```
@@ -271,6 +308,10 @@ python -m compileall .              # quick syntax check
 ```
 
 ## 📚 Commands Reference
+
+These are the manual REPL commands. Typing anything else runs the agent
+loop on that request (see [Coding Agent](#-coding-agent)) -- `--no-agent`
+switches plain queries back to simple chat.
 
 | Command | Description |
 |---------|-------------|
@@ -318,21 +359,23 @@ are identical in both:
 ```
 assistant.py (CLI)      pi_ai_coder.tui (Textual UI)
         \                     /
-         AssistantService (pi_ai_coder.core)
-          |        |        |         |
-     ContextManager  ModelProvider  Tools  SessionState
-          |         (via factory.py)     (shell/git/file)
+         AgentService (pi_ai_coder.agent) <-- default for plain queries
+          |         AssistantService (pi_ai_coder.core) <-- --no-agent chat
           |               |
-          |      LlamaCppProvider / OllamaProvider / FakeModelProvider
+     ToolRegistry    ModelProvider (via factory.py)
+          |               |
+     ShellTool/GitTool/   LlamaCppProvider / OllamaProvider / FakeModelProvider
+     FileTool/SearchTool
 ```
 
 **Key Components:**
 
 - `assistant.py` - CLI entry point (REPL + one-shot + `tui` subcommand)
+- `pi_ai_coder/agent/` - the coding agent: `AgentService` (the bounded loop), `ToolRegistry`, the `<tool_call>` protocol parser, permission classification, `AgentEvent`s
 - `pi_ai_coder/context/` - Intelligent file handling (moved from `context_manager.py`)
 - `pi_ai_coder/models/` - `ModelProvider` interface, `factory.py` (the only place that picks a backend), `LlamaCppProvider`, `OllamaProvider`, `FakeModelProvider`
-- `pi_ai_coder/tools/` - `ShellTool`, `GitTool`, `FileTool` with path-safety checks
-- `pi_ai_coder/core/` - `AssistantService`, session persistence, streaming events
+- `pi_ai_coder/tools/` - `ShellTool`, `GitTool`, `FileTool`, `SearchTool` with path-safety checks -- shared by the agent, the CLI, and the TUI
+- `pi_ai_coder/core/` - `AssistantService` (plain chat + session/context management), session persistence, streaming events, project-root resolution
 - `pi_ai_coder/tui/` - the Textual workspace
 - `setup.sh` - Automated installation
 

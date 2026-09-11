@@ -17,10 +17,11 @@ HELP_TEXT = """\
   ctrl+l        focus prompt composer
   ctrl+g        focus git panel
   ctrl+t        focus tool output
+  ctrl+d        view changes (git diff)
   ctrl+r        reset conversation
   ctrl+k        clear manual context
   f1            this help screen
-  ctrl+c        cancel generation (while the model is responding)
+  ctrl+c        cancel the running agent task
   ctrl+q        quit
 
 [bold]Project tree[/bold]
@@ -38,6 +39,16 @@ HELP_TEXT = """\
   a / d         add / remove file from context
   escape, q     close preview
 
+[bold]Coding agent[/bold]
+  Typing a request in the prompt runs the full agent loop: it inspects
+  the project, searches code, reads files, edits them (create/patch/
+  write/delete/move), runs commands/tests, and iterates until done --
+  shown as "● action" lines in the conversation. Reads and ordinary edits
+  happen automatically; a shell command that looks destructive (rm -rf,
+  git reset --hard, force pushes, ...) pauses for an approval dialog
+  first. Use ctrl+d or the git panel to review what changed; PI-AI-CODER
+  never commits, pushes, or discards changes on its own.
+
 [bold]Model provider[/bold]
   Use the command palette's "List models" / "Change model" to switch
   models within the current provider (llama.cpp or Ollama). Switching
@@ -45,9 +56,12 @@ HELP_TEXT = """\
   --provider, since the two backends work very differently.
 
 [bold]Known limitations (this iteration)[/bold]
-  - No in-place file editing yet (preview is read-only).
-  - The model cannot request tools itself yet -- all shell/git/file
-    actions are user-initiated, by design (see CLAUDE.md).
+  - No in-place file editing in the preview pane (it's read-only; the
+    agent's own file tools are how edits actually happen).
+  - The agent's tool-calling uses a text-based protocol understood by
+    any capable model, not a given provider's native function-calling.
+  - No checkpoint/undo system yet beyond git itself -- review with
+    ctrl+d before committing.
 
 Press escape or q to close this screen.
 """

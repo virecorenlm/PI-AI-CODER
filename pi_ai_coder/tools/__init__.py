@@ -1,6 +1,7 @@
 from .base import PathOutsideProjectError, RiskLevel, ToolResult, resolve_within_project
 from .files import FileTool
 from .git import GitFileStatus, GitTool
+from .search import SearchTool
 from .shell import ShellTool
 
 __all__ = [
@@ -12,4 +13,5 @@ __all__ = [
     "GitTool",
     "GitFileStatus",
     "FileTool",
+    "SearchTool",
 ]
