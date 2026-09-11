@@ -1,16 +1,52 @@
-# Configuration for Pi Code Assistant
-# Copy this to config.yaml and customize
+# Configuration for PI-AI-CODER
+# Copy this to config.yaml and customize.
+#
+# PI-AI-CODER runs on any Linux host (Raspberry Pi, an Ubuntu workstation,
+# etc.) with a choice of model backend ("provider"). Hardware tuning
+# (threads, context size, which provider) belongs here, not in code.
 
 # Model settings
 model:
+  # Which backend to use: "llama_cpp" or "ollama"
+  provider: llama_cpp
+
+  # -- llama.cpp settings (used when provider: llama_cpp) --
   path: "./models/qwen2.5-coder-7b-instruct-q4_k_m.gguf"
+  llama_cpp_dir: "./llama.cpp"
+  threads: 4  # tune per host -- e.g. 4 on a Pi 5, higher on a workstation
+
+  # -- shared sampling settings (used by both providers) --
   context_size: 4096
   max_tokens: 2048
   temperature: 0.1
   top_p: 0.95
   top_k: 40
   repeat_penalty: 1.1
-  threads: 4  # Pi 5 has 4 cores
+
+# Ollama settings (used when model.provider: ollama)
+# Ollama is assumed to already be running (e.g. `ollama serve`, or as a
+# systemd service) -- PI-AI-CODER only talks to it over HTTP and never
+# starts an Ollama process itself.
+ollama:
+  host: "http://127.0.0.1:11434"
+  model: "qwen3.5:latest"
+  timeout: 120
+
+# Optional named host profiles -- a bundle of the settings above, selected
+# with `--profile <name>` or a top-level `profile: <name>` key here. Handy
+# when the same project directory is used from more than one machine.
+# Keys are flat (not nested under model:/ollama:); "model" means an Ollama
+# tag when the profile's provider is ollama, otherwise a llama.cpp GGUF path.
+profiles:
+  pi5:
+    provider: llama_cpp
+    threads: 4
+    context_size: 4096
+
+  asrock:
+    provider: ollama
+    ollama_host: "http://127.0.0.1:11434"
+    model: "qwen3.5:latest"
 
 # Context management
 context:

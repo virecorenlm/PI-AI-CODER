@@ -1,0 +1,40 @@
+[project]
+name = "pi-ai-coder"
+version = "0.2.0"
+description = "A local-first coding assistant workspace for Raspberry Pi (and beyond)"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "textual>=0.60",
+    "rich>=13.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.23",
+]
+
+[project.scripts]
+pi-coder = "assistant:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["assistant", "context_manager", "model_runner"]
+packages = [
+    "pi_ai_coder",
+    "pi_ai_coder.core",
+    "pi_ai_coder.context",
+    "pi_ai_coder.models",
+    "pi_ai_coder.tools",
+    "pi_ai_coder.tui",
+    "pi_ai_coder.tui.widgets",
+    "pi_ai_coder.tui.screens",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

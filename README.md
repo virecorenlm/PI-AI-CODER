@@ -1,12 +1,12 @@
-# Raspberry Pi Code Assistant 🥧🤖
+# PI-AI-CODER 🥧🤖
 
-**A Claude Code / Gemini CLI-style coding assistant running entirely on your Raspberry Pi 5**
+**A Claude Code / Gemini CLI-style local coding assistant -- from a Raspberry Pi 5 to a full Linux workstation**
 
-Local AI-powered code assistant with intelligent file context, conversation memory, and zero API costs. Built specifically for Raspberry Pi 5 with optimized performance.
+Local AI-powered code assistant with intelligent file context, conversation memory, and zero API costs. Runs on llama.cpp (GGUF models, great for a Pi) or Ollama (great on a workstation with more RAM/GPU) through the same interface.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Platform: Raspberry Pi 5](https://img.shields.io/badge/Platform-Raspberry%20Pi%205-red)](https://www.raspberrypi.com/products/raspberry-pi-5/)
-[![Model: Qwen2.5-Coder](https://img.shields.io/badge/Model-Qwen2.5--Coder-blue)](https://huggingface.co/Qwen)
+[![Platform: Linux](https://img.shields.io/badge/Platform-Linux-red)](https://www.raspberrypi.com/products/raspberry-pi-5/)
+[![Providers: llama.cpp | Ollama](https://img.shields.io/badge/Providers-llama.cpp%20%7C%20Ollama-blue)](#-model-providers)
 
 ## 🚀 Quick Start
 
@@ -29,10 +29,54 @@ chmod +x setup.sh
 - **🤖 Smart AI Assistant**: Qwen2.5-Coder 7B model optimized for code
 - **📁 File-Aware**: Automatically reads and understands your codebase
 - **💬 Conversational**: Multi-turn conversations with memory
-- **⚡ Optimized**: Tuned for Pi 5 (16GB) - ~5-10 tokens/second
+- **⚡ Optimized**: Tuned per host via config -- ~5-10 tokens/second on a Pi 5, much faster on a workstation
+- **🔌 Pluggable Model Backends**: llama.cpp or Ollama, chosen by config/CLI flag, no code changes
 - **🔧 Tool Integration**: Shell commands, git, file operations
+- **🖥️ Full-Screen TUI**: A Textual workspace with a file tree, streaming
+  chat, context panel, git status, and tool output (`./run.sh tui`)
 - **🎯 Zero Cost**: Completely local, no API fees
-- **🔒 Private**: Your code never leaves your Pi
+- **🔒 Private**: Your code never leaves your machine
+
+## 🔌 Model Providers
+
+PI-AI-CODER talks to models through one interface and supports two backends:
+
+```bash
+# llama.cpp (default) -- GGUF models, good for a Pi or any CPU-only box
+./run.sh --provider llama_cpp --model ./models/qwen2.5-coder-7b-instruct-q4_k_m.gguf
+
+# Ollama -- point at an already-running server (never started for you)
+./run.sh --provider ollama --ollama-model qwen3.5:latest
+
+# Named host profile from config.yaml (see config.example.yaml)
+./run.sh --profile asrock
+```
+
+Or set it once in `config.yaml`:
+
+```yaml
+model:
+  provider: ollama   # or llama_cpp
+ollama:
+  host: "http://127.0.0.1:11434"
+  model: "qwen3.5:latest"
+```
+
+Inside the REPL/TUI, `models` lists what's available and `model <name>`
+switches models within the current provider.
+
+## 🖥️ TUI Workspace
+
+```bash
+./run.sh tui                # full-screen workspace
+./run.sh tui --fake-model   # try it without llama.cpp/a GGUF model
+```
+
+Project tree on the left, streaming conversation and prompt composer on
+the right, git status and tool output along the bottom. `Ctrl+P` opens
+the command palette; `F1` shows all keyboard shortcuts. See
+[DOCUMENTATION.md](DOCUMENTATION.md#tui-workspace) for the full shortcut
+list and current limitations.
 
 ## 📊 What You Get
 
@@ -84,10 +128,14 @@ chmod +x setup.sh
 
 ## 📋 Requirements
 
-- **Hardware**: Raspberry Pi 5 (8GB minimum, 16GB recommended)
-- **OS**: Raspberry Pi OS 64-bit (Debian 12 Bookworm)
-- **Storage**: ~20GB free space
-- **Internet**: Only for initial setup (download model)
+- **Hardware**: Raspberry Pi 5 (8GB minimum, 16GB recommended) *or* any 64-bit
+  Linux workstation -- more RAM/CPU/GPU just means faster inference
+- **OS**: 64-bit Linux (Raspberry Pi OS, Ubuntu, Debian, ...)
+- **Model backend**: either a local llama.cpp build + GGUF model, or an
+  already-running [Ollama](https://ollama.com) server
+- **Storage**: ~20GB free space (for a llama.cpp GGUF model; not needed if
+  using Ollama, which manages its own model storage)
+- **Internet**: Only for initial setup (downloading llama.cpp/a model, or `ollama pull`)
 
 ## 🔧 Installation
 
@@ -193,6 +241,15 @@ chmod +x *.py *.sh
 ./run.sh --help
 ```
 
+## 🧪 Development
+
+```bash
+pip install pytest pytest-asyncio  # test deps
+pytest                              # backend + TUI smoke tests (no model needed)
+./run.sh tui --fake-model           # try the TUI without llama.cpp/a GGUF model
+python -m compileall .              # quick syntax check
+```
+
 ## 📚 Commands Reference
 
 | Command | Description |
@@ -205,11 +262,16 @@ chmod +x *.py *.sh
 | `exec <cmd>` | Execute shell command |
 | `save <file>` | Save last code block |
 | `diff` | Show git diff |
+| `models` | List models available for the current provider |
+| `model [name]` | Show, or switch to, the active model |
 | `reset` | Reset conversation |
 | `help` | Show all commands |
 | `quit` | Exit |
 
 ## ⚡ Performance
+
+Performance depends entirely on the host and provider you choose --
+tune `threads`/`context_size` in `config.yaml` (or a profile) per machine.
 
 ### Raspberry Pi 5 (16GB)
 
@@ -229,26 +291,34 @@ Use Phi-3.5-mini instead:
 
 ## 🔬 Architecture
 
+The CLI and the TUI are both thin front-ends over one backend package,
+`pi_ai_coder`, so context selection, model execution, and tool behavior
+are identical in both:
+
 ```
-User Query
-    ↓
-Context Manager (smart file chunking)
-    ↓
-Conversation Manager (history + prompt)
-    ↓
-llama.cpp (7B model, 4-bit quantized)
-    ↓
-Response Processing (code extraction)
-    ↓
-Output + Tool Execution
+assistant.py (CLI)      pi_ai_coder.tui (Textual UI)
+        \                     /
+         AssistantService (pi_ai_coder.core)
+          |        |        |         |
+     ContextManager  ModelProvider  Tools  SessionState
+          |         (via factory.py)     (shell/git/file)
+          |               |
+          |      LlamaCppProvider / OllamaProvider / FakeModelProvider
 ```
 
 **Key Components:**
 
-- `assistant.py` - Main CLI and REPL
-- `context_manager.py` - Intelligent file handling
-- `model_runner.py` - llama.cpp wrapper
+- `assistant.py` - CLI entry point (REPL + one-shot + `tui` subcommand)
+- `pi_ai_coder/context/` - Intelligent file handling (moved from `context_manager.py`)
+- `pi_ai_coder/models/` - `ModelProvider` interface, `factory.py` (the only place that picks a backend), `LlamaCppProvider`, `OllamaProvider`, `FakeModelProvider`
+- `pi_ai_coder/tools/` - `ShellTool`, `GitTool`, `FileTool` with path-safety checks
+- `pi_ai_coder/core/` - `AssistantService`, session persistence, streaming events
+- `pi_ai_coder/tui/` - the Textual workspace
 - `setup.sh` - Automated installation
+
+`context_manager.py` and `model_runner.py` remain at the repo root as
+backward-compatible shims, in case anything still imports them directly.
+See [DOCUMENTATION.md](DOCUMENTATION.md#architecture) for the full picture.
 
 ## 🎯 Recommended Models
 

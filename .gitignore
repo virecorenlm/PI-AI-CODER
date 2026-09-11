@@ -104,3 +104,6 @@ docker-compose.override.yml
 *.pyc
 *.pyo
 *.pyd
+
+# PI-AI-CODER session state
+.pi-ai-coder/

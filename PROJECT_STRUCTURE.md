@@ -3,39 +3,62 @@
 ```
 pi-code-assistant/
 │
-├── Core Application
-│   ├── assistant.py              # Main CLI application (entry point)
-│   ├── context_manager.py        # Intelligent file chunking & context
-│   ├── model_runner.py           # llama.cpp wrapper & conversation
+├── Core Application (entry points)
+│   ├── assistant.py              # CLI entry point (REPL, one-shot, `tui` subcommand)
+│   ├── context_manager.py        # Backward-compat shim -> pi_ai_coder.context
+│   ├── model_runner.py           # Backward-compat shim -> pi_ai_coder.models
 │   └── run.sh                    # Launcher script (created by setup)
+│
+├── pi_ai_coder/                  # Backend package (used by both CLI and TUI)
+│   ├── config.py                 # YAML + env + CLI config loading, provider selection, host profiles
+│   ├── context/
+│   │   └── manager.py            # ContextManager/FileChunk (chunking, relevance scoring)
+│   ├── models/
+│   │   ├── base.py               # ModelProvider interface, Message, ModelConfig, ModelInfo, HealthStatus
+│   │   ├── factory.py            # create_provider(config) -- the only provider-branching code
+│   │   ├── llama_cpp_provider.py # LlamaCppProvider (real streaming, cancellation, model discovery)
+│   │   ├── ollama_provider.py    # OllamaProvider (HTTP API, never spawns a process)
+│   │   └── fake_provider.py      # FakeModelProvider (deterministic, no model needed)
+│   ├── tools/
+│   │   ├── base.py               # RiskLevel, ToolResult, safe path resolution
+│   │   ├── shell.py              # ShellTool
+│   │   ├── git.py                # GitTool (read-only status/diff/log)
+│   │   └── files.py              # FileTool (read/save, project-boundary enforced)
+│   ├── core/
+│   │   ├── events.py             # StreamEvent/EventType/AssistantStatus
+│   │   ├── session.py            # SessionState + SessionStore (JSON persistence)
+│   │   └── assistant_service.py  # AssistantService: ties it all together
+│   └── tui/
+│       ├── app.py                # PiAiCoderApp (Textual)
+│       ├── widgets/               # ProjectTree, ConversationView, PromptComposer, ...
+│       └── screens/               # PreviewScreen, HelpScreen, CommandInputScreen
+│
+├── tests/                        # pytest suite (no real model required)
 │
 ├── Setup & Configuration
 │   ├── setup.sh                  # Automated installation
-│   ├── config.example.yaml       # Example configuration
-│   └── requirements.txt          # Python dependencies (if any)
+│   ├── config.example.yaml       # Example configuration (copy to config.yaml)
+│   └── pyproject.toml            # Package metadata, deps, `pi-coder` console script
 │
 ├── Documentation
-│   ├── README.md                 # Project overview (create this)
+│   ├── README.md                 # Project overview
 │   ├── QUICKSTART.md            # 5-minute setup guide
 │   ├── DOCUMENTATION.md         # Comprehensive docs
-│   └── EXAMPLES.md              # Usage examples (optional)
+│   └── PROJECT_STRUCTURE.md     # This file
 │
 ├── Dependencies (created by setup)
 │   ├── llama.cpp/               # llama.cpp build
-│   │   ├── main                 # Main executable
-│   │   ├── quantize             # Quantization tool
+│   │   ├── llama-cli / main     # CLI executable (either name is detected)
 │   │   └── ...
 │   │
 │   ├── models/                  # GGUF models
-│   │   ├── qwen2.5-coder-7b-instruct-q4_k_m.gguf
-│   │   └── ...
+│   │   └── qwen2.5-coder-7b-instruct-q4_k_m.gguf
 │   │
-│   └── venv/                    # Python virtual environment
-│       └── ...
+│   └── venv/ or .venv/          # Python virtual environment
 │
-└── Runtime (created during use)
-    ├── .file_cache/             # Cached file chunks
-    └── performance.log          # Performance logs (if enabled)
+└── Runtime (created during use, gitignored)
+    └── .pi-ai-coder/
+        └── session.json          # Persisted context files, recent prompts, conversation
 ```
 
 ## File Descriptions
@@ -43,28 +66,42 @@ pi-code-assistant/
 ### Core Application Files
 
 **assistant.py**
-- Main CLI application
-- Handles user interaction (REPL)
-- Command processing
-- File management
-- Tool execution (shell, git, save)
-- Lines: ~400
+- CLI entry point: REPL, one-shot queries, and the `tui` subcommand
+- Command processing (`add`/`remove`/`files`/`exec`/`save`/`diff`/... )
+- Delegates all real work to `pi_ai_coder` (context, model, tools)
 
-**context_manager.py**
-- Smart file loading and chunking
+**context_manager.py** / **model_runner.py**
+- Backward-compatible shims. The real implementations now live in
+  `pi_ai_coder/context/manager.py` and `pi_ai_coder/models/`
+  (`llama_cpp_provider.py`, `fake_provider.py`); these two files just
+  re-export/adapt them so old imports keep working.
+
+**pi_ai_coder/context/manager.py**
+- Smart file loading and chunking (unchanged behavior from the original)
 - Semantic code parsing (Python, generic)
 - Relevance scoring for context
-- Token limit management
-- File caching
-- Lines: ~300
+- Token limit management, file caching
 
-**model_runner.py**
-- llama.cpp wrapper
-- Prompt formatting (ChatML for Qwen)
-- Conversation history management
-- Response parsing & code extraction
-- Streaming support (experimental)
-- Lines: ~300
+**pi_ai_coder/models/**
+- `base.py`: the `ModelProvider` interface (`chat`, `stream_chat`, `cancel`, `health_check`, `list_models`, `set_model`) all backends implement
+- `factory.py`: `create_provider(config, fake_model=...)` -- the *only* place that branches on which backend is active
+- `llama_cpp_provider.py`: llama.cpp wrapper -- ChatML prompt formatting, real token streaming, clean cancellation, detects either the `llama-cli` or `main` executable name, scans the model's directory (not the whole filesystem) for other GGUF files
+- `ollama_provider.py`: talks to an already-running Ollama server over HTTP (`/api/chat`, `/api/tags`) -- never shells out to `ollama` or starts a server process
+- `fake_provider.py`: deterministic streaming backend used by `--fake-model` and the test suite
+
+**pi_ai_coder/tools/**
+- `shell.py` (`ShellTool`), `git.py` (`GitTool`, read-only), `files.py` (`FileTool`, path-boundary enforced)
+- `base.py`: shared `RiskLevel` (READ/WRITE/EXECUTE/DESTRUCTIVE) and `ToolResult`
+
+**pi_ai_coder/core/**
+- `assistant_service.py`: `AssistantService` -- context resolution, message assembly, blocking/streaming chat
+- `session.py`: `SessionState`/`SessionStore` -- JSON persistence under `.pi-ai-coder/`
+- `events.py`: the `StreamEvent`/`EventType`/`AssistantStatus` vocabulary used to stream activity to a UI
+
+**pi_ai_coder/tui/**
+- `app.py`: the Textual `PiAiCoderApp`
+- `widgets/`: `ProjectTree`, `ConversationView`, `PromptComposer`, `ContextPanel`, `ToolOutput`, `GitPanel`, `StatusBar`
+- `screens/`: `PreviewScreen` (read-only file preview), `HelpScreen`, `CommandInputScreen` (modal text input)
 
 ### Setup Files
 
@@ -226,35 +263,51 @@ Add in `handle_command()` in `assistant.py`
 
 ## Future Enhancements
 
-Potential improvements:
-- [ ] YAML config file loading
-- [ ] Multiple model support (switch on-the-fly)
+Done in this iteration:
+- [x] YAML config file loading (`pi_ai_coder/config.py`)
+- [x] Textual TUI workspace with streaming, context/git/tool panels
+- [x] Fake model backend + test suite (no GGUF/llama.cpp required for tests)
+- [x] Session persistence (`.pi-ai-coder/session.json`)
+- [x] Multi-provider model backend: llama.cpp and Ollama behind one interface, chosen via config/`--provider`/host profile
+- [x] Named host profiles (`config.yaml`'s `profiles:` section) for using one project directory from multiple machines
+- [x] Model discovery (`models`/`model <name>` commands, "List models"/"Change model" in the TUI)
+
+Still potential improvements:
+- [ ] In-place file editing (preview is currently read-only)
+- [ ] Model-requested tool calls behind a real permission/approval system
+- [ ] An OpenAI-compatible local-server provider
 - [ ] Embeddings for semantic file search
 - [ ] Web UI (optional)
 - [ ] IDE integration (VSCode extension)
-- [ ] Collaborative mode (multi-user)
-- [ ] Code execution sandboxing
 - [ ] Automated testing generation
-- [ ] Documentation generation
 - [ ] Commit message generation
 - [ ] Code review automation
 
 ## Testing
 
-Currently no formal tests. To add:
-
 ```bash
 tests/
+├── test_config.py
 ├── test_context_manager.py
-├── test_model_runner.py
-├── test_assistant.py
-└── test_integration.py
+├── test_session.py
+├── test_tools.py
+├── test_fake_provider.py
+├── test_llama_cpp_provider.py
+├── test_ollama_provider.py     # HTTP calls mocked -- no server needed
+├── test_factory.py
+├── test_import_order.py        # guards against a circular-import regression
+├── test_assistant_service.py
+└── test_tui_smoke.py           # headless Textual Pilot tests
 ```
 
 Run with:
 ```bash
-python -m pytest tests/
+pip install pytest pytest-asyncio
+pytest
 ```
+
+None of these require a real GGUF model or llama.cpp build --
+`FakeModelProvider` stands in for the model everywhere it's needed.
 
 ## Contributing
 

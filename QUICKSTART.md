@@ -37,6 +37,9 @@ chmod +x setup.sh
 
 # One-shot mode
 ./run.sh -q "Write a hello world program in Rust"
+
+# Full-screen TUI workspace (file tree, streaming chat, git, tool output)
+./run.sh tui
 ```
 
 ## Common Commands

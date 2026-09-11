@@ -131,8 +131,18 @@ if [ -n "$MODEL_FILE" ]; then
         echo -e "${GREEN}✓${NC} Model already exists"
     fi
     
-    # Update default model in assistant.py
-    sed -i "s|default='./models/.*\.gguf'|default='./models/$MODEL_FILE'|" assistant.py
+    # Record the chosen model as the default in config.yaml (read by
+    # pi_ai_coder.config -- see config.example.yaml). Only written if no
+    # config.yaml exists yet, so a customized config is never clobbered.
+    if [ ! -f "config.yaml" ]; then
+        cat > config.yaml << EOF
+model:
+  path: "./models/$MODEL_FILE"
+EOF
+        echo -e "${GREEN}✓${NC} Wrote config.yaml with model.path"
+    else
+        echo -e "${YELLOW}ℹ${NC} config.yaml already exists -- set model.path to ./models/$MODEL_FILE yourself if needed"
+    fi
 fi
 
 # Python virtual environment
@@ -144,8 +154,9 @@ fi
 
 source venv/bin/activate
 
-# Install Python packages (minimal, no heavy deps needed)
+# Install Python packages: PyYAML for config, Textual+Rich for the TUI
 pip install --upgrade pip
+pip install textual rich pyyaml
 echo -e "${GREEN}✓${NC} Python environment ready"
 
 # Make scripts executable
@@ -176,7 +187,9 @@ else
     exit 1
 fi
 
-# Create README
+# Create a minimal README only if one doesn't already exist -- never
+# clobber the project's real README.md on repeat runs.
+if [ ! -f "README.md" ]; then
 cat > README.md << 'EOF'
 # Code Assistant for Raspberry Pi 5
 
@@ -187,6 +200,9 @@ Local AI coding assistant powered by llama.cpp and Qwen2.5-Coder.
 ```bash
 # Interactive mode
 ./run.sh
+
+# Full-screen TUI workspace
+./run.sh tui
 
 # With specific files
 ./run.sh main.py utils.py
@@ -241,13 +257,15 @@ wget <model-url>
 ```
 .
 ├── assistant.py          # Main CLI
-├── context_manager.py    # File context handling
-├── model_runner.py       # llama.cpp wrapper
+├── pi_ai_coder/          # Backend (context, models, tools, TUI)
+├── context_manager.py    # Backward-compat shim
+├── model_runner.py       # Backward-compat shim
 ├── llama.cpp/           # llama.cpp build
 ├── models/              # GGUF models
 └── run.sh               # Launcher script
 ```
 EOF
+fi
 
 # Final instructions
 echo
